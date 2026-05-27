@@ -1,0 +1,16 @@
+# Rust ビルド成果物
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# 機密情報を含む環境変数ファイル (公開禁止)
+.env
+.env.local
+.env.*.local
+
+# エディタ / OS のゴミ
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

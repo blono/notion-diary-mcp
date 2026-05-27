@@ -1,0 +1,28 @@
+# Rust ビルド成果物
+/target
+
+# Git
+.git
+.gitignore
+.github
+
+# IDE / OS
+.idea
+.vscode
+.DS_Store
+
+# 機密情報
+.env
+.env.local
+.env.*.local
+
+# ドキュメント（ビルドに不要）
+README.md
+docs/
+
+# Docker 自身
+Dockerfile
+.dockerignore
+
+# CI 設定
+cloudbuild.yaml
