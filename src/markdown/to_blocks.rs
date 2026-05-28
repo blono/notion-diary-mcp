@@ -299,7 +299,12 @@ fn parse_list_items(iter: &mut EventIter, ordered: bool, blocks: &mut Vec<Block>
 
 /// 1 つの List Item を解釈する。
 ///
-/// Item の最初の Paragraph が rich_text、それ以降のブロック（ネストリスト等）が children になる。
+/// pulldown-cmark の List Item の中身は、以下の順で来る:
+///   - tight list（項目間に空行なし）: 本文が `Text` 等のインラインで直接来る
+///   - loose list（項目間に空行あり）: 本文が `Paragraph` で包まれて来る
+///   - 入れ子: 本文インラインの後に `Start(List)` が続く
+/// よって「インライン列を rich_text に集めつつ、ネストブロックの Start が来たら
+/// children に回す」という方針で 1 ループにまとめて処理する。
 /// TaskListMarker が先頭にあれば to_do block として扱う。
 fn parse_one_item(iter: &mut EventIter, ordered: bool, blocks: &mut Vec<Block>) {
     // 先頭が TaskListMarker かチェック
@@ -311,20 +316,121 @@ fn parse_one_item(iter: &mut EventIter, ordered: bool, blocks: &mut Vec<Block>) 
         iter.next();
     }
 
-    // Item の中身を blocks として読む
-    let inner_blocks = parse_blocks(iter, Some(&TagEnd::Item));
-
-    // 最初の Paragraph を rich_text に、それ以外を children に振り分ける
     let mut rich_text: Vec<RichText> = Vec::new();
     let mut children: Vec<Block> = Vec::new();
-    for (i, b) in inner_blocks.into_iter().enumerate() {
-        if i == 0 {
-            if let Block::Paragraph(rt) = b {
-                rich_text = rt;
-                continue;
+    // インライン装飾の状態（太字・斜体・リンク等）
+    let mut state = InlineState::default();
+    let mut state_stack: Vec<InlineState> = Vec::new();
+
+    while let Some(ev) = iter.next() {
+        match ev {
+            // Item の終了
+            Event::End(TagEnd::Item) => break,
+
+            // ---- 本文インライン（tight list はここに直接来る） ----
+            Event::Text(t) => {
+                if !t.is_empty() {
+                    rich_text.push(state.make_rich_text(t.to_string()));
+                }
             }
+            Event::Code(t) => {
+                let mut s = state.clone();
+                s.code = true;
+                rich_text.push(s.make_rich_text(t.to_string()));
+            }
+            Event::SoftBreak => {
+                rich_text.push(state.make_rich_text(" ".into()));
+            }
+            Event::HardBreak => {
+                rich_text.push(state.make_rich_text("\n".into()));
+            }
+            Event::Start(Tag::Strong) => {
+                state_stack.push(state.clone());
+                state.bold = true;
+            }
+            Event::Start(Tag::Emphasis) => {
+                state_stack.push(state.clone());
+                state.italic = true;
+            }
+            Event::Start(Tag::Strikethrough) => {
+                state_stack.push(state.clone());
+                state.strikethrough = true;
+            }
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                state_stack.push(state.clone());
+                state.link = Some(dest_url.to_string());
+            }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                state_stack.push(state.clone());
+                state.link = Some(dest_url.to_string());
+            }
+            Event::End(TagEnd::Strong)
+            | Event::End(TagEnd::Emphasis)
+            | Event::End(TagEnd::Strikethrough)
+            | Event::End(TagEnd::Link)
+            | Event::End(TagEnd::Image) => {
+                if let Some(prev) = state_stack.pop() {
+                    state = prev;
+                }
+            }
+            Event::Html(t) | Event::InlineHtml(t) => {
+                rich_text.push(state.make_rich_text(t.to_string()));
+            }
+
+            // ---- loose list: 本文が Paragraph で包まれて来るケース ----
+            Event::Start(Tag::Paragraph) => {
+                let rt = parse_inline_until(iter, TagEnd::Paragraph);
+                if rich_text.is_empty() {
+                    // まだ本文未確定なら、この段落を本文 rich_text にする
+                    rich_text = rt;
+                } else if !rt.is_empty() {
+                    // 2 つ目以降の段落は children の段落ブロックとして追加
+                    children.push(Block::Paragraph(rt));
+                }
+            }
+
+            // ---- ネストしたリスト: children に回す ----
+            Event::Start(Tag::List(start)) => {
+                let nested_ordered = start.is_some();
+                parse_list_items(iter, nested_ordered, &mut children);
+            }
+
+            // ---- その他のネストブロック（コードブロック等） ----
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let language = match kind {
+                    CodeBlockKind::Fenced(lang) => lang.to_string(),
+                    CodeBlockKind::Indented => String::new(),
+                };
+                let mut code = String::new();
+                while let Some(ev) = iter.next() {
+                    match ev {
+                        Event::Text(t) => code.push_str(&t),
+                        Event::End(TagEnd::CodeBlock) => break,
+                        _ => {}
+                    }
+                }
+                while code.ends_with('\n') {
+                    code.pop();
+                }
+                children.push(Block::Code { language, code });
+            }
+
+            // 想定外の Start は対応する End まで読み飛ばす（整合性維持）
+            Event::Start(other) => {
+                skip_until_matching_end(iter, &tag_end_for(&other));
+            }
+
+            // それ以外（想定外の End 等）は無視
+            _ => {}
         }
-        children.push(b);
+    }
+
+    // 空アイテムのガード:
+    // markdown 末尾の余分な改行・空行などで pulldown-cmark が中身のない Item を
+    // 生成することがある。rich_text も children も空なら弾く（空のリスト項目が
+    // Notion に作られるのを防ぐ）。to_do は空チェックの可能性があるため対象外。
+    if !is_todo && rich_text.is_empty() && children.is_empty() {
+        return;
     }
 
     if is_todo {
@@ -661,5 +767,50 @@ mod tests {
         let blocks = markdown_to_blocks("[Anthropic](https://www.anthropic.com)");
         let rt = &blocks[0]["paragraph"]["rich_text"][0];
         assert_eq!(rt["text"]["link"]["url"], "https://www.anthropic.com");
+    }
+
+    #[test]
+    fn 箇条書きの本文が_rich_text_に入る() {
+        // tight list の本文（Paragraph で包まれず Text が直接来る）が
+        // 正しく rich_text に格納されることを確認
+        let blocks = markdown_to_blocks("- item 1\n- item 2");
+        assert_eq!(blocks.len(), 2);
+        let rt0 = blocks[0]["bulleted_list_item"]["rich_text"]
+            .as_array()
+            .unwrap();
+        assert!(!rt0.is_empty());
+        assert_eq!(rt0[0]["text"]["content"], "item 1");
+    }
+
+    #[test]
+    fn 入れ子リストの親の本文が保持される() {
+        let blocks = markdown_to_blocks("- parent\n  - child");
+        assert_eq!(blocks.len(), 1);
+        let parent_rt = blocks[0]["bulleted_list_item"]["rich_text"]
+            .as_array()
+            .unwrap();
+        assert_eq!(parent_rt[0]["text"]["content"], "parent");
+        let children = &blocks[0]["bulleted_list_item"]["children"];
+        assert_eq!(children[0]["type"], "bulleted_list_item");
+        let child_rt = children[0]["bulleted_list_item"]["rich_text"]
+            .as_array()
+            .unwrap();
+        assert_eq!(child_rt[0]["text"]["content"], "child");
+    }
+
+    #[test]
+    fn 末尾の空行で空リスト項目が生成されない() {
+        let blocks = markdown_to_blocks("- item 1\n- item 2\n\n");
+        let count = blocks
+            .iter()
+            .filter(|b| b["type"] == "bulleted_list_item")
+            .count();
+        assert_eq!(count, 2);
+        for b in &blocks {
+            if b["type"] == "bulleted_list_item" {
+                let rt = b["bulleted_list_item"]["rich_text"].as_array().unwrap();
+                assert!(!rt.is_empty(), "空の bulleted_list_item が生成された: {b:?}");
+            }
+        }
     }
 }
