@@ -98,7 +98,7 @@ pub async fn save_diary(
             }
             replace_today_section(client, &month_page_id, &blocks, idx, content_blocks).await?
         }
-        None => append_new_day(client, &month_page_id, &heading_text, content_blocks).await?,
+        None => append_new_day(client, &month_page_id, &blocks, &heading_text, content_blocks).await?,
     };
 
     info!(
@@ -119,12 +119,24 @@ pub async fn save_diary(
 }
 
 /// 新規日: 見出し + 本文を月ページ末尾に append する。
+///
+/// 日記と日記の間に余計な空行を作らないため、月ページ末尾が空段落で
+/// 終わっている場合は、その空段落を削除してから見出しを追記する。
 async fn append_new_day(
     client: &NotionClient,
     month_page_id: &str,
+    blocks: &[crate::notion::types::BlockResponse],
     heading_text: &str,
     content_blocks: Vec<Value>,
 ) -> AppResult<SaveDiaryOutcome> {
+    // 末尾が空段落なら削除する（前の日記との間の余計な空行をなくす）。
+    // Notion 上ではアーカイブ = ゴミ箱送りなので復旧可能。
+    if let Some(last) = blocks.last() {
+        if is_empty_paragraph(last) {
+            client.delete_block(&last.id).await?;
+        }
+    }
+
     let heading_block = json!({
         "object": "block",
         "type": "heading_1",
@@ -135,8 +147,8 @@ async fn append_new_day(
             }]
         }
     });
-    let mut all = Vec::with_capacity(content_blocks.len() + 1);
 
+    let mut all = Vec::with_capacity(content_blocks.len() + 1);
     all.push(heading_block);
     all.extend(content_blocks);
 
@@ -145,6 +157,12 @@ async fn append_new_day(
         .await?;
 
     Ok(SaveDiaryOutcome::Appended)
+}
+
+/// ブロックが「空の段落ブロック」かどうかを判定する。
+/// 空の段落ブロック = block_type が "paragraph" かつ rich_text が空。
+fn is_empty_paragraph(block: &crate::notion::types::BlockResponse) -> bool {
+    block.block_type == "paragraph" && block.rich_text().is_empty()
 }
 
 /// 今日の日記を差し替える: 既存セクションを削除 → 見出し直後に新本文を挿入。
