@@ -809,7 +809,10 @@ mod tests {
         for b in &blocks {
             if b["type"] == "bulleted_list_item" {
                 let rt = b["bulleted_list_item"]["rich_text"].as_array().unwrap();
-                assert!(!rt.is_empty(), "空の bulleted_list_item が生成された: {b:?}");
+                assert!(
+                    !rt.is_empty(),
+                    "空の bulleted_list_item が生成された: {b:?}"
+                );
             }
         }
     }

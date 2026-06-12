@@ -98,7 +98,16 @@ pub async fn save_diary(
             }
             replace_today_section(client, &month_page_id, &blocks, idx, content_blocks).await?
         }
-        None => append_new_day(client, &month_page_id, &blocks, &heading_text, content_blocks).await?,
+        None => {
+            append_new_day(
+                client,
+                &month_page_id,
+                &blocks,
+                &heading_text,
+                content_blocks,
+            )
+            .await?
+        }
     };
 
     info!(
